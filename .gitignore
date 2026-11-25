@@ -1,0 +1,8 @@
+build/
+dist/
+*.spec
+saved_models/
+signals_log.csv
+__pycache__/
+.venv/
+.vscode/
