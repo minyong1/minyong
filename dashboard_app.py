@@ -4,11 +4,14 @@ import platform
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import streamlit as st
 
 from core_engine import (
     STOCK_UNIVERSE,
+    calc_forecast_range,
+    find_similar_chart_patterns,
     get_log_path,
     predict_today_signal,
     run_walk_forward_backtest,
@@ -47,11 +50,12 @@ with st.sidebar:
     min_proba = st.slider("2차 진입 기준 확률", 0.45, 0.65, 0.52, 0.01)
     sizing_method = st.radio("비중 조절 방식 (Bet Sizing)", ["afml", "linear"], horizontal=True)
 
-tab_scan, tab_single, tab_bt, tab_log = st.tabs([
+tab_scan, tab_single, tab_bt, tab_log, tab_scenario = st.tabs([
     "오늘의 추천 종목 (스캐너)",
     "개별 종목 신호",
     "Walk-Forward 백테스트",
     "자동 실행 로그",
+    "차트 시나리오 도우미",
 ])
 
 # 탭 1: 전체 종목 스캔 및 추천
@@ -88,7 +92,6 @@ with tab_scan:
         )
         progress_bar.empty()
 
-        # 매수 추천 종목 요약 카드
         buy_df = scan_df[scan_df["추천비중(%)"] > 0]
         st.divider()
         if buy_df.empty:
@@ -213,3 +216,155 @@ with tab_log:
         st.dataframe(log_df.iloc[::-1], use_container_width=True, hide_index=True)
     else:
         st.info("아직 자동 실행 로그(signals_log.csv)가 없습니다. weekly_job.py를 먼저 실행해 보세요.")
+
+# 탭 5: 차트 시나리오 도우미 (2가지 모드 버튼 전환)
+with tab_scenario:
+    st.subheader(f"차트 시나리오 도우미 ({ticker})")
+    st.caption("증권사 차트 흐름을 참고할 때 쓸 수 있는 보조 도구입니다. 투자 권유가 아닌 참고용 통계 계산입니다.")
+
+    if "scenario_mode" not in st.session_state:
+        st.session_state.scenario_mode = "pattern"
+
+    b_col1, b_col2, _ = st.columns([1.4, 1.4, 2.2])
+    if b_col1.button(
+        "① 과거 유사 구간 찾기",
+        type="primary" if st.session_state.scenario_mode == "pattern" else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state.scenario_mode = "pattern"
+
+    if b_col2.button(
+        "② 예상 레인지 계산기",
+        type="primary" if st.session_state.scenario_mode == "range" else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state.scenario_mode = "range"
+
+    st.divider()
+
+    # 모드 1: 과거 유사 구간 찾기
+    if st.session_state.scenario_mode == "pattern":
+        st.markdown("#### 과거 유사 차트 구간 찾기")
+        st.caption("최근 N일 가격 모양과 비슷한 과거 구간을 찾아, 이후 M일 동안 어떻게 움직였는지 확인합니다.")
+
+        p_c1, p_c2, p_c3 = st.columns(3)
+        lookback_d = p_c1.slider("비교할 최근 기간 (거래일)", 5, 30, 15, 1)
+        horizon_d = p_c2.slider("이후 확인할 기간 (거래일)", 3, 20, 10, 1)
+        top_k_n = p_c3.slider("상위 유사 구간 수", 3, 10, 5, 1)
+
+        if st.button("유사 구간 검색 실행", type="primary"):
+            with st.spinner(f"{ticker} 과거 차트 패턴 비교 중..."):
+                try:
+                    res = find_similar_chart_patterns(
+                        ticker=ticker,
+                        start=start_date,
+                        lookback_days=lookback_d,
+                        horizon_days=horizon_d,
+                        top_k=top_k_n,
+                    )
+                    st.session_state["last_pattern_res"] = res
+                    st.session_state["last_vol_pct"] = res["daily_vol_pct"]
+                    st.session_state["last_close_price"] = res["latest_close"]
+                except Exception as e:
+                    st.error(f"패턴 분석 오류: {e}")
+
+        if "last_pattern_res" in st.session_state:
+            res = st.session_state["last_pattern_res"]
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric(f"유사 구간 평균 ({res['horizon_days']}일 후)", f"{res['avg_ret_pct']:+.2f}%")
+            m2.metric("상승 비율 (양수)", f"{res['win_rate_pct']:.1f}%")
+            m3.metric("최고 / 최저 수익률", f"{res['best_ret_pct']:+.2f}% / {res['worst_ret_pct']:+.2f}%")
+            m4.metric("평균 시나리오 환산가", f"{res['expected_price']:,.2f}")
+
+            st.caption(
+                f"기준일: {res['as_of_date']} | 현재 종가: {res['latest_close']:,.2f} | "
+                f"참고 범위: {res['low_band_price']:,.2f} ~ {res['high_band_price']:,.2f}"
+            )
+
+            fig, ax = plt.subplots(figsize=(10, 4.5))
+            x_hist = np.arange(-res["lookback_days"] + 1, 1)
+            x_fut = np.arange(0, res["horizon_days"] + 1)
+
+            ax.plot(x_hist, res["cur_norm_pct"], color="black", linewidth=2.5, label=f"현재 ({res['ticker']})")
+            for m in res["top_matches"]:
+                ax.plot(
+                    x_fut,
+                    m["future_path_pct"],
+                    linestyle="--",
+                    alpha=0.55,
+                    label=f"{m['end_date'].strftime('%Y-%m-%d')} 이후 ({m['future_ret_pct']:+.1f}%)",
+                )
+            ax.plot(
+                x_fut,
+                res["avg_future_path_pct"],
+                color="tab:red",
+                linewidth=2.2,
+                label=f"상위 {len(res['top_matches'])}개 평균 경로",
+            )
+            ax.axvline(0, color="gray", linestyle=":", linewidth=1)
+            ax.axhline(0, color="gray", linestyle=":", linewidth=1)
+            ax.set_xlabel("상대 거래일 (0 = 기준일)")
+            ax.set_ylabel("시작점 대비 누적 변화율 (%)")
+            ax.set_title(f"{res['ticker']} 유사 과거 구간 및 이후 {res['horizon_days']}일 흐름")
+            ax.legend(loc="best", fontsize=8)
+            ax.grid(alpha=0.3)
+            plt.tight_layout()
+            st.pyplot(fig)
+            plt.close(fig)
+
+            st.dataframe(res["summary_df"], use_container_width=True, hide_index=True)
+
+    # 모드 2: 예상 레인지 계산기
+    else:
+        st.markdown("#### 예상 레인지(가격 범위) 계산기")
+        st.caption("증권사 차트에서 확인한 현재가와 변동성을 입력해 예상 상단·하단 가격 범위를 계산합니다.")
+
+        default_price = float(st.session_state.get("last_close_price", 100.0))
+        default_vol = float(st.session_state.get("last_vol_pct", 2.0))
+
+        r_c1, r_c2, r_c3 = st.columns(3)
+        manual_price = r_c1.number_input("현재가 (또는 증권사 차트 가격)", min_value=0.01, value=default_price, step=1.0)
+        manual_vol_pct = r_c2.number_input("일별 변동성 (%)", min_value=0.0, max_value=30.0, value=default_vol, step=0.1)
+        range_days = r_c3.slider("예상 기간 (거래일)", 1, 30, max_holding, 1)
+
+        r_c4, r_c5 = st.columns(2)
+        drift_day_pct = r_c4.number_input("일 평균 기대 방향성 (%)", min_value=-5.0, max_value=5.0, value=0.0, step=0.05)
+        sigma_mult = r_c5.slider("레인지 폭 배수 (1σ ≈ 68%, 1.5σ ≈ 87%)", 0.5, 2.5, 1.0, 0.1)
+
+        if st.button("예상 레인지 계산", type="primary"):
+            try:
+                f_res = calc_forecast_range(
+                    current_price=manual_price,
+                    daily_vol_pct=manual_vol_pct,
+                    horizon_days=range_days,
+                    drift_pct_per_day=drift_day_pct,
+                    sigma_mult=sigma_mult,
+                )
+
+                k1, k2, k3 = st.columns(3)
+                k1.success(f"예상 상단: **{f_res['final_upper']:,.2f}** ({f_res['final_up_pct']:+.2f}%)")
+                k2.info(f"중간 기준선: **{f_res['final_mid']:,.2f}**")
+                k3.error(f"예상 하단: **{f_res['final_lower']:,.2f}** ({f_res['final_down_pct']:+.2f}%)")
+
+                fig, ax = plt.subplots(figsize=(10, 4))
+                ax.plot(f_res["days"], f_res["mid_curve"], color="tab:blue", linewidth=2, label="중간 기준선")
+                ax.fill_between(
+                    f_res["days"],
+                    f_res["lower_curve"],
+                    f_res["upper_curve"],
+                    color="tab:blue",
+                    alpha=0.2,
+                    label=f"예상 레인지 ({sigma_mult:.1f}σ)",
+                )
+                ax.set_xlabel("향후 거래일")
+                ax.set_ylabel("예상 가격")
+                ax.set_title(f"{range_days}거래일 예상 가격 레인지")
+                ax.legend()
+                ax.grid(alpha=0.3)
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close(fig)
+
+                st.dataframe(f_res["range_df"], use_container_width=True, hide_index=True)
+            except Exception as e:
+                st.error(f"레인지 계산 오류: {e}")

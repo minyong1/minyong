@@ -729,3 +729,171 @@ def scan_and_recommend_stocks(
             ascending=[False, False],
         ).reset_index(drop=True)
     return df
+# 11. 과거 유사 차트 패턴 검색 및 이후 수익률 분포 분석
+def find_similar_chart_patterns(
+    ticker: str,
+    start: str = "2018-01-01",
+    lookback_days: int = 15,
+    horizon_days: int = 10,
+    top_k: int = 5,
+    vol_window: int = 20,
+    min_vol: float = 0.008,
+) -> dict:
+    if lookback_days < 5 or horizon_days < 1 or top_k < 1:
+        raise ValueError("탐색 기간과 상위 개수는 1 이상으로 설정해 주세요.")
+
+    data = download_ohlcv(ticker, start=start)
+    closes = data["Close"].to_numpy(dtype=float)
+    dates = data.index
+    n = len(closes)
+
+    min_required = lookback_days + horizon_days + 25
+    if n < min_required:
+        raise ValueError(f"[{ticker}] 패턴 분석을 위한 과거 데이터가 충분하지 않습니다.")
+
+    # 현재 패턴: 최근 lookback_days 종가의 기준일 대비 정규화 경로
+    cur_start_idx = n - lookback_days
+    cur_window = closes[cur_start_idx:n]
+    cur_norm = (cur_window / cur_window[0] - 1.0) * 100.0
+    cur_norm_norm = np.linalg.norm(cur_norm)
+    if cur_norm_norm < 1e-9:
+        raise ValueError("최근 구간의 가격 변동이 거의 없어 패턴 유사도를 계산할 수 없습니다.")
+
+    candidates: list[dict] = []
+    # 현재 시점과 겹치지 않고, horizon_days 뒤 수익률이 존재하는 마지막 후보 인덱스
+    max_cand_end = n - horizon_days - 1
+    min_gap = max(lookback_days, horizon_days)
+
+    for end_idx in range(lookback_days, max_cand_end + 1):
+        start_idx = end_idx - lookback_days
+        # 최근 구간과 과도하게 겹치는 인접 구간 제외
+        if (cur_start_idx - end_idx) < min_gap:
+            continue
+
+        seg = closes[start_idx : end_idx + 1]
+        seg_norm = (seg / seg[0] - 1.0) * 100.0
+        seg_norm_norm = np.linalg.norm(seg_norm)
+        if seg_norm_norm < 1e-9:
+            continue
+
+        similarity = float(np.dot(cur_norm, seg_norm) / (cur_norm_norm * seg_norm_norm))
+        future_ret = float((closes[end_idx + horizon_days] / closes[end_idx] - 1.0) * 100.0)
+        future_path = ((closes[end_idx : end_idx + horizon_days + 1] / closes[end_idx]) - 1.0) * 100.0
+
+        candidates.append({
+            "start_date": dates[start_idx],
+            "end_date": dates[end_idx],
+            "similarity": similarity,
+            "future_ret_pct": future_ret,
+            "future_path_pct": future_path,
+        })
+
+    if not candidates:
+        raise ValueError("비교 가능한 과거 패턴 구간을 찾지 못했습니다.")
+
+    candidates.sort(key=lambda x: x["similarity"], reverse=True)
+    top_matches = candidates[:top_k]
+
+    future_rets = np.array([m["future_ret_pct"] for m in top_matches], dtype=float)
+    avg_ret = float(np.mean(future_rets))
+    med_ret = float(np.median(future_rets))
+    win_rate = float(np.mean(future_rets > 0.0) * 100.0)
+    best_ret = float(np.max(future_rets))
+    worst_ret = float(np.min(future_rets))
+
+    latest_close = float(closes[-1])
+    expected_price = latest_close * (1.0 + avg_ret / 100.0)
+    low_band_price = latest_close * (1.0 + worst_ret / 100.0)
+    high_band_price = latest_close * (1.0 + best_ret / 100.0)
+
+    # 미래 경로 평균(0일 ~ horizon_days일)
+    avg_future_path = np.mean([m["future_path_pct"] for m in top_matches], axis=0)
+
+    summary_rows = []
+    for rank, m in enumerate(top_matches, start=1):
+        summary_rows.append({
+            "순위": rank,
+            "과거구간": f"{m['start_date'].date()} ~ {m['end_date'].date()}",
+            "유사도": f"{m['similarity'] * 100:.1f}%",
+            f"{horizon_days}일후수익률(%)": round(m["future_ret_pct"], 2),
+        })
+
+    # 현재 변동성도 함께 반환해 예상 레인지 탭과 연동 가능하게 구성
+    daily_vol = float(
+        pd.Series(closes).pct_change().rolling(vol_window).std().clip(lower=min_vol).iloc[-1]
+    )
+
+    return {
+        "ticker": ticker.upper(),
+        "as_of_date": str(dates[-1].date()),
+        "latest_close": latest_close,
+        "daily_vol_pct": round(daily_vol * 100.0, 2),
+        "lookback_days": lookback_days,
+        "horizon_days": horizon_days,
+        "cur_dates": dates[cur_start_idx:n],
+        "cur_norm_pct": cur_norm,
+        "avg_future_path_pct": avg_future_path,
+        "top_matches": top_matches,
+        "summary_df": pd.DataFrame(summary_rows),
+        "avg_ret_pct": round(avg_ret, 2),
+        "med_ret_pct": round(med_ret, 2),
+        "win_rate_pct": round(win_rate, 1),
+        "best_ret_pct": round(best_ret, 2),
+        "worst_ret_pct": round(worst_ret, 2),
+        "expected_price": round(expected_price, 2),
+        "low_band_price": round(low_band_price, 2),
+        "high_band_price": round(high_band_price, 2),
+    }
+
+
+# 12. 증권사 차트 수치 기반 예상 레인지(가격 범위) 계산
+def calc_forecast_range(
+    current_price: float,
+    daily_vol_pct: float,
+    horizon_days: int = 10,
+    drift_pct_per_day: float = 0.0,
+    sigma_mult: float = 1.0,
+) -> dict:
+    if current_price <= 0:
+        raise ValueError("현재가는 0보다 커야 합니다.")
+    if daily_vol_pct < 0:
+        raise ValueError("일별 변동성은 0 이상이어야 합니다.")
+    if horizon_days < 1:
+        raise ValueError("예상 기간은 1일 이상이어야 합니다.")
+
+    vol = daily_vol_pct / 100.0
+    drift = drift_pct_per_day / 100.0
+
+    days = np.arange(0, horizon_days + 1)
+    # 기간 t 동안의 누적 드리프트와 sqrt(t) 변동성 스케일링
+    mid_curve = current_price * ((1.0 + drift) ** days)
+    band_width = current_price * vol * np.sqrt(days) * sigma_mult
+
+    upper_curve = mid_curve + band_width
+    lower_curve = np.maximum(mid_curve - band_width, 0.0)
+
+    final_mid = float(mid_curve[-1])
+    final_upper = float(upper_curve[-1])
+    final_lower = float(lower_curve[-1])
+
+    range_df = pd.DataFrame({
+        "경과일": [f"+{d}일" for d in days],
+        "예상하단": np.round(lower_curve, 2),
+        "기준선": np.round(mid_curve, 2),
+        "예상상단": np.round(upper_curve, 2),
+        "상단괴리(%)": np.round((upper_curve / current_price - 1.0) * 100.0, 2),
+        "하단괴리(%)": np.round((lower_curve / current_price - 1.0) * 100.0, 2),
+    })
+
+    return {
+        "days": days,
+        "lower_curve": lower_curve,
+        "mid_curve": mid_curve,
+        "upper_curve": upper_curve,
+        "final_lower": round(final_lower, 2),
+        "final_mid": round(final_mid, 2),
+        "final_upper": round(final_upper, 2),
+        "final_down_pct": round((final_lower / current_price - 1.0) * 100.0, 2),
+        "final_up_pct": round((final_upper / current_price - 1.0) * 100.0, 2),
+        "range_df": range_df,
+    }
