@@ -8,7 +8,7 @@
 미국 주식·ETF 및 국내 주식(KOSPI/KOSDAQ)을 대상으로 **Triple-Barrier 라벨링**, **LightGBM Meta-Labeling**, **Bet Sizing(투자 비중 조절)**을 결합해 오늘의 매수 추천 종목과 Walk-Forward 백테스트 결과를 제공하는 퀀트 대시보드입니다.
 
 > 🌐 **웹에서 바로 사용하기:** `https://<본인-앱-주소>.streamlit.app` *(Streamlit Cloud 배포 후 링크 교체)*  
-> 💻 **Windows 실행 파일(`.exe`) 다운로드:** [Releases 페이지에서 최신 버전 받기](https://github.com/<본인-아이디>/<저장소-이름>/releases)
+> 💻 **Windows 실행 파일(`.exe`) 다운로드:** [Releases 페이지에서 최신 버전 받기](https://github.com/minyong1/minyong/releases)
 
 ---
 
@@ -44,15 +44,15 @@
 ## 🚀 실행 방법
 
 ### 방법 1. Windows `.exe` 파일로 바로 실행 (Python 설치 불필요)
-1. [Releases](https://github.com/<본인-아이디>/<저장소-이름>/releases)에서 `StockQuantApp.zip`을 다운로드해 압축을 풉니다.
+1. [Releases](https://github.com/minyong1/minyong/releases)에서 `StockQuantApp.zip`을 다운로드해 압축을 풉니다.
 2. 압축을 푼 폴더 안의 `StockQuantApp.exe`를 더블클릭하면 브라우저에 대시보드가 자동으로 열립니다.
    - `_internal` 폴더가 반드시 `StockQuantApp.exe`와 같은 위치에 있어야 합니다.
    - 처음 실행 시 **Windows의 PC 보호** 경고 창이 뜨면 **`추가 정보` → `실행`**을 클릭하세요.
 
 ### 방법 2. 소스 코드로 직접 실행 (개발자용)
 ```bash
-git clone https://github.com/<본인-아이디>/<저장소-이름>.git
-cd <저장소-이름>
+git clone https://github.com/minyong1/minyong.git
+cd minyong
 
 # 가상환경 생성 및 패키지 설치 (Conda 권장)
 conda create -n stock_quant python=3.12 -y
